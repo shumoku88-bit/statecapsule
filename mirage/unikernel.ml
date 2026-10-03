@@ -19,16 +19,11 @@ type failure_point =
   | After_commit_before_publish
 
 let failure_point =
-  let values =
-    [ "none", No_failure
-    ; "before-commit", Before_commit
-    ; "after-commit-before-publish", After_commit_before_publish
-    ]
-  in
   let doc =
-    "TEST ONLY. Pause a fresh mutation at a persistence boundary so an external      harness can kill the unikernel. Production/default value is none."
+    "TEST ONLY. Pause a fresh mutation at a persistence boundary so an external \
+     harness can kill the unikernel. Production/default value is none."
   in
-  Arg.(value & opt (enum values) No_failure & info ~doc [ "failure-point" ])
+  Arg.(value & opt string "none" & info ~doc [ "failure-point" ])
 
 module Make
     (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t)
