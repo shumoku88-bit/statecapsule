@@ -17,6 +17,7 @@ refused transitions still come from `Statecapsule_core.State.apply`.
 The first qualified target is MirageOS Unix with host/socket networking:
 
 ```sh
+opam install .
 opam install mirage.4.11.2
 cd mirage
 mirage configure -t unix --net socket
