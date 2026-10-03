@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+
+retry() {
+  local attempts="$1"
+  shift
+  local n=1
+
+  until "$@"; do
+    if [[ "$n" -ge "$attempts" ]]; then
+      echo "command failed after $attempts attempts: $*" >&2
+      return 1
+    fi
+
+    echo "attempt $n failed; retrying: $*" >&2
+    sleep $((n * 5))
+    n=$((n + 1))
+  done
+}
+
+opam install .
+opam install mirage.4.11.2
+
+(
+  cd mirage
+  opam exec -- mirage configure -t hvt
+  retry 3 opam exec -- make depends
+  opam exec -- dune build
+)
+
+artifact="mirage/dist/statecapsule-http.hvt"
+
+if [[ ! -s "$artifact" ]]; then
+  echo "missing or empty hvt artifact: $artifact" >&2
+  exit 1
+fi
+
+echo "Artifact:"
+file "$artifact"
+ls -lh "$artifact"
+
+echo
+echo "SHA-256:"
+sha256sum "$artifact"
+
+echo
+echo "Solo5 application manifest:"
+opam exec -- solo5-elftool query-manifest "$artifact"
+
+echo
+echo "MirageOS hvt artifact build: OK"

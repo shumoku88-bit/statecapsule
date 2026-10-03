@@ -1,0 +1,32 @@
+name: MirageOS hvt
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hvt-artifact:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.4.1"
+
+      - name: Build and inspect hvt artifact
+        run: bash tools/build-mirage-hvt
+
+      - name: Upload hvt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: statecapsule-http-hvt
+          path: mirage/dist/statecapsule-http.hvt
+          if-no-files-found: error
