@@ -170,13 +170,29 @@ opam exec -- chamelon write "$image" 512 /capsule corrupt
 : >"$log"
 opam exec -- solo5-hvt   --mem=64   --net:service="$tap"   --block:capsule="$image"   -- "$artifact"   --ipv4="$guest_ip/$prefix"   --ipv4-gateway="$host_ip"   --port "$port"   >"$log" 2>&1 &
 pid=$!
-sleep 1
 
-if kill -0 "$pid" 2>/dev/null; then
-  echo "hvt guest accepted a malformed persisted snapshot" >&2
+rejected=false
+for _ in $(seq 1 40); do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rejected=true
+    break
+  fi
+
+  if curl --noproxy '*' --silent --show-error --connect-timeout 1     "$base/state" >/dev/null 2>&1; then
+    echo "hvt guest accepted a malformed persisted snapshot" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+
+  sleep 0.25
+done
+
+if [[ "$rejected" != "true" ]]; then
+  echo "hvt guest neither rejected malformed storage nor became ready" >&2
   cat "$log" >&2
   exit 1
 fi
+
 wait "$pid" 2>/dev/null || true
 pid=""
 
