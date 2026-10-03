@@ -5,7 +5,7 @@ let port = Runtime_arg.create ~pos:__POS__ "Unikernel.port"
 
 let main =
   main "Unikernel.Make"
-    ~packages:[ package "statecapsule" ]
+    ~packages:[ package "statecapsule" ~sublibs:[ "core" ] ]
     (http_server @-> job)
 
 let stackv4v6 = generic_stackv4v6 default_network
