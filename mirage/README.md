@@ -34,6 +34,30 @@ curl -X POST http://127.0.0.1:8080/arm
 curl -X POST http://127.0.0.1:8080/consume
 ```
 
+## hvt artifact
+
+The same adapter can also be cross-compiled as a Solo5 `hvt` unikernel:
+
+```sh
+bash tools/build-mirage-hvt
+```
+
+A successful build produces:
+
+```text
+mirage/dist/statecapsule-http.hvt
+```
+
+CI verifies that the file exists, records its SHA-256 digest, and asks
+`solo5-elftool query-manifest` to inspect the embedded Solo5 application
+manifest. The workflow also uploads the resulting `.hvt` file as a GitHub
+Actions artifact.
+
+This qualifies **artifact construction**, not boot. Running an `hvt` network
+unikernel requires a suitable Solo5 tender plus a host network device such as a
+TAP interface. That runtime boundary is intentionally separate from this build
+check.
+
 ## Important limits
 
 This is **not** a remotely safe service.
