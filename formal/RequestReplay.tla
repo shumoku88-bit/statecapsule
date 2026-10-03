@@ -48,7 +48,7 @@ ConflictResponses ==
   [kind : {"conflict"}, id : RequestIds, cmd : Commands, outcome : {IdConflict}]
 
 Responses ==
-  {NoResponse} \/ FreshResponses \/ ReplayResponses \/ ConflictResponses
+  {NoResponse} \cup FreshResponses \cup ReplayResponses \cup ConflictResponses
 
 Outcome(s, cmd) ==
   CASE s = Locked /\ cmd = ArmCmd -> Applied(Armed)
@@ -63,17 +63,17 @@ NextState(s, cmd) ==
     [] s = Armed /\ cmd = ConsumeCmd -> Used
     [] OTHER -> s
 
-SeenId(id) ==
-  \E receipt \in seen : receipt.id = id
-
-Receipt(id) ==
-  CHOOSE receipt \in seen : receipt.id = id
-
 VARIABLES
   state,
   seen,
   successfulConsumes,
   lastResponse
+
+SeenId(id) ==
+  \E receipt \in seen : receipt.id = id
+
+Receipt(id) ==
+  CHOOSE receipt \in seen : receipt.id = id
 
 vars ==
   <<state, seen, successfulConsumes, lastResponse>>
