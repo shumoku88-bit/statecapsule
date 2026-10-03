@@ -4,6 +4,8 @@ open Mirage
 let port = Runtime_arg.create ~pos:__POS__ "Unikernel.port"
 let program_block_size =
   Runtime_arg.create ~pos:__POS__ "Unikernel.program_block_size"
+let failure_point =
+  Runtime_arg.create ~pos:__POS__ "Unikernel.failure_point"
 
 let main =
   main "Unikernel.Make"
@@ -19,4 +21,5 @@ let store = chamelon ~program_block_size block
 
 let () =
   register "statecapsule-http"
+    ~runtime_args:[ Runtime_arg.v failure_point ]
     [ main $ http_server $ store ]

@@ -13,6 +13,23 @@ let program_block_size =
   in
   Arg.(value & opt int 16 doc)
 
+type failure_point =
+  | No_failure
+  | Before_commit
+  | After_commit_before_publish
+
+let failure_point =
+  let values =
+    [ "none", No_failure
+    ; "before-commit", Before_commit
+    ; "after-commit-before-publish", After_commit_before_publish
+    ]
+  in
+  let doc =
+    "TEST ONLY. Pause a fresh mutation at a persistence boundary so an external      harness can kill the unikernel. Production/default value is none."
+  in
+  Arg.(value & opt (enum values) No_failure & info ~doc [ "failure-point" ])
+
 module Make
     (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t)
     (Store : Mirage_kv.RW) =
@@ -24,6 +41,21 @@ struct
   let current = ref Request.initial
   let blocked = ref false
   let mutation_lock = Lwt_mutex.create ()
+
+  let failure_point_to_string = function
+    | No_failure -> "none"
+    | Before_commit -> "before-commit"
+    | After_commit_before_publish -> "after-commit-before-publish"
+
+  let pause_at configured expected =
+    if configured = expected then begin
+      Logs.warn (fun log ->
+        log "STATECAPSULE_FAILPOINT %s"
+          (failure_point_to_string expected));
+      let forever, _wake = Lwt.wait () in
+      forever
+    end else
+      Lwt.return_unit
 
   let current_state_string () =
     State.to_string (Request.state !current)
@@ -84,7 +116,7 @@ struct
   let commit store machine =
     Store.set store capsule_key (Request.snapshot machine)
 
-  let submit store reqd request command =
+  let submit store failure_point reqd request command =
     match H1.Headers.get request.H1.Request.headers "idempotency-key" with
     | None ->
         respond reqd `Bad_request (json_error "missing_idempotency_key")
@@ -111,8 +143,11 @@ struct
                     respond reqd `Conflict (json_error "id_conflict");
                     Lwt.return_unit
                 | Request.Fresh outcome ->
+                    pause_at failure_point Before_commit >>= fun () ->
                     commit store next >>= function
                     | Ok () ->
+                        pause_at failure_point After_commit_before_publish
+                        >>= fun () ->
                         current := next;
                         respond_outcome reqd "fresh" outcome;
                         Lwt.return_unit
@@ -122,7 +157,7 @@ struct
                              Store.pp_write_error error);
                         Lwt.return_unit))
 
-  let request_handler store _flow (_ipaddr, _port) reqd =
+  let request_handler store failure_point _flow (_ipaddr, _port) reqd =
     let request = H1.Reqd.request reqd in
     H1.Body.Reader.close (H1.Reqd.request_body reqd);
     if !blocked then
@@ -132,9 +167,9 @@ struct
       | `GET, "/state" ->
           respond reqd `OK (json_state ())
       | `POST, "/arm" ->
-          submit store reqd request State.Arm
+          submit store failure_point reqd request State.Arm
       | `POST, "/consume" ->
-          submit store reqd request State.Consume
+          submit store failure_point reqd request State.Consume
       | _ ->
           respond reqd `Not_found {|{"error":"not_found"}
 |}
@@ -171,13 +206,13 @@ struct
         Lwt.fail_with
           (Fmt.str "persistent load failed: %a" Store.pp_error error)
 
-  let start http_server store =
+  let start http_server store failure_point =
     load store >>= fun machine ->
     current := machine;
     let service =
       HTTP_server.http_service
         ~error_handler
-        (request_handler store)
+        (request_handler store failure_point)
     in
     let (`Initialized thread) = Paf.serve service http_server in
     thread
