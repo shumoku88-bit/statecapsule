@@ -47,6 +47,12 @@ struct
     | Before_commit -> "before-commit"
     | After_commit_before_publish -> "after-commit-before-publish"
 
+  let failure_point_of_string = function
+    | "none" -> Ok No_failure
+    | "before-commit" -> Ok Before_commit
+    | "after-commit-before-publish" -> Ok After_commit_before_publish
+    | value -> Error (Printf.sprintf "unknown failure point %S" value)
+
   let pause_at configured expected =
     if configured = expected then begin
       Logs.warn (fun log ->
@@ -206,14 +212,18 @@ struct
         Lwt.fail_with
           (Fmt.str "persistent load failed: %a" Store.pp_error error)
 
-  let start http_server store failure_point =
-    load store >>= fun machine ->
-    current := machine;
-    let service =
-      HTTP_server.http_service
-        ~error_handler
-        (request_handler store failure_point)
-    in
-    let (`Initialized thread) = Paf.serve service http_server in
-    thread
+  let start http_server store failure_point_text =
+    match failure_point_of_string failure_point_text with
+    | Error error ->
+        Lwt.fail_with error
+    | Ok failure_point ->
+        load store >>= fun machine ->
+        current := machine;
+        let service =
+          HTTP_server.http_service
+            ~error_handler
+            (request_handler store failure_point)
+        in
+        let (`Initialized thread) = Paf.serve service http_server in
+        thread
 end
