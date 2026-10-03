@@ -10,6 +10,7 @@ host_ip="10.77.0.1"
 guest_ip="10.77.0.2"
 prefix="24"
 port="18080"
+base="http://$guest_ip:$port"
 log="$(mktemp)"
 state_file="$(mktemp)"
 pid=""
@@ -49,7 +50,7 @@ pid=$!
 
 ready=false
 for _ in $(seq 1 80); do
-  if curl       --noproxy '*'       --silent       --show-error       --connect-timeout 1       "http://$guest_ip:$port/state"       >"$state_file" 2>/dev/null; then
+  if curl       --noproxy '*'       --silent       --show-error       --connect-timeout 1       "$base/state"       >"$state_file" 2>/dev/null; then
     ready=true
     break
   fi
@@ -72,49 +73,105 @@ fi
 initial="$(cat "$state_file")"
 if [[ "$initial" != '{"state":"locked"}' ]]; then
   echo "unexpected initial response: $initial" >&2
-  cat "$log" >&2
+  exit 1
+fi
+
+missing_file="$(mktemp)"
+missing_status="$(
+  curl --noproxy '*' --silent --show-error     -o "$missing_file"     -w '%{http_code}'     -X POST     "$base/arm"
+)"
+missing="$(cat "$missing_file")"
+rm -f "$missing_file"
+if [[ "$missing_status" != "400" ]]; then
+  echo "expected 400 without Idempotency-Key, got $missing_status" >&2
+  exit 1
+fi
+if [[ "$missing" != '{"error":"missing_idempotency_key","current_state":"locked"}' ]]; then
+  echo "unexpected missing-key response: $missing" >&2
+  exit 1
+fi
+
+early_file="$(mktemp)"
+early_status="$(
+  curl --noproxy '*' --silent --show-error     -o "$early_file"     -w '%{http_code}'     -X POST     -H 'Idempotency-Key: too-early'     "$base/consume"
+)"
+early="$(cat "$early_file")"
+rm -f "$early_file"
+if [[ "$early_status" != "409" ]]; then
+  echo "expected fresh refusal 409, got $early_status" >&2
+  exit 1
+fi
+if [[ "$early" != '{"request":"fresh","outcome":{"kind":"refused","error":"not_armed"},"current_state":"locked"}' ]]; then
+  echo "unexpected fresh refusal: $early" >&2
   exit 1
 fi
 
 armed="$(
-  curl --noproxy '*' --silent --show-error -X POST     "http://$guest_ip:$port/arm"
+  curl --noproxy '*' --silent --show-error     -X POST     -H 'Idempotency-Key: arm-1'     "$base/arm"
 )"
-if [[ "$armed" != '{"state":"armed"}' ]]; then
-  echo "unexpected arm response: $armed" >&2
+if [[ "$armed" != '{"request":"fresh","outcome":{"kind":"applied","state":"armed"},"current_state":"armed"}' ]]; then
+  echo "unexpected fresh arm response: $armed" >&2
+  exit 1
+fi
+
+early_replay_file="$(mktemp)"
+early_replay_status="$(
+  curl --noproxy '*' --silent --show-error     -o "$early_replay_file"     -w '%{http_code}'     -X POST     -H 'Idempotency-Key: too-early'     "$base/consume"
+)"
+early_replay="$(cat "$early_replay_file")"
+rm -f "$early_replay_file"
+if [[ "$early_replay_status" != "409" ]]; then
+  echo "expected replay refusal 409, got $early_replay_status" >&2
+  exit 1
+fi
+if [[ "$early_replay" != '{"request":"replay","outcome":{"kind":"refused","error":"not_armed"},"current_state":"armed"}' ]]; then
+  echo "unexpected replay refusal: $early_replay" >&2
+  exit 1
+fi
+
+arm_replay="$(
+  curl --noproxy '*' --silent --show-error     -X POST     -H 'Idempotency-Key: arm-1'     "$base/arm"
+)"
+if [[ "$arm_replay" != '{"request":"replay","outcome":{"kind":"applied","state":"armed"},"current_state":"armed"}' ]]; then
+  echo "unexpected arm replay: $arm_replay" >&2
+  exit 1
+fi
+
+conflict_file="$(mktemp)"
+conflict_status="$(
+  curl --noproxy '*' --silent --show-error     -o "$conflict_file"     -w '%{http_code}'     -X POST     -H 'Idempotency-Key: arm-1'     "$base/consume"
+)"
+conflict="$(cat "$conflict_file")"
+rm -f "$conflict_file"
+if [[ "$conflict_status" != "409" ]]; then
+  echo "expected id conflict 409, got $conflict_status" >&2
+  exit 1
+fi
+if [[ "$conflict" != '{"error":"id_conflict","current_state":"armed"}' ]]; then
+  echo "unexpected id conflict response: $conflict" >&2
   exit 1
 fi
 
 used="$(
-  curl --noproxy '*' --silent --show-error -X POST     "http://$guest_ip:$port/consume"
+  curl --noproxy '*' --silent --show-error     -X POST     -H 'Idempotency-Key: consume-1'     "$base/consume"
 )"
-if [[ "$used" != '{"state":"used"}' ]]; then
-  echo "unexpected consume response: $used" >&2
+if [[ "$used" != '{"request":"fresh","outcome":{"kind":"applied","state":"used"},"current_state":"used"}' ]]; then
+  echo "unexpected fresh consume response: $used" >&2
   exit 1
 fi
 
-refusal_file="$(mktemp)"
-status="$(
-  curl     --noproxy '*'     --silent     --show-error     -o "$refusal_file"     -w '%{http_code}'     -X POST     "http://$guest_ip:$port/consume"
+used_replay="$(
+  curl --noproxy '*' --silent --show-error     -X POST     -H 'Idempotency-Key: consume-1'     "$base/consume"
 )"
-refusal="$(cat "$refusal_file")"
-rm -f "$refusal_file"
-
-if [[ "$status" != "409" ]]; then
-  echo "expected 409 after terminal consume, got $status" >&2
+if [[ "$used_replay" != '{"request":"replay","outcome":{"kind":"applied","state":"used"},"current_state":"used"}' ]]; then
+  echo "unexpected consume replay: $used_replay" >&2
   exit 1
 fi
 
-if [[ "$refusal" != '{"error":"already_used","state":"used"}' ]]; then
-  echo "unexpected refusal response: $refusal" >&2
-  exit 1
-fi
-
-final="$(
-  curl --noproxy '*' --silent --show-error     "http://$guest_ip:$port/state"
-)"
+final="$(curl --noproxy '*' --silent --show-error "$base/state")"
 if [[ "$final" != '{"state":"used"}' ]]; then
   echo "unexpected final response: $final" >&2
   exit 1
 fi
 
-echo "Solo5 hvt HTTP runtime smoke test: OK"
+echo "Solo5 hvt HTTP idempotency smoke test: OK"
