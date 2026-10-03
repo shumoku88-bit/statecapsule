@@ -4,7 +4,7 @@ open Mirage
 let port = Runtime_arg.create ~pos:__POS__ "Unikernel.port"
 let program_block_size =
   Runtime_arg.create ~pos:__POS__ "Unikernel.program_block_size"
-let failure_point =
+let failure_point : string runtime_arg =
   Runtime_arg.create ~pos:__POS__ "Unikernel.failure_point"
 
 let main =
