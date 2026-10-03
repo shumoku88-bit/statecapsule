@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+
+dot="$workdir/statecapsule.dot"
+tlc_transitions="$workdir/tlc.tsv"
+ocaml_transitions="$workdir/ocaml.tsv"
+
+bash tools/check-tla --dump-dot "$dot"
+
+python3 tools/normalize_tlc_dot.py "$dot"   | LC_ALL=C sort -u   > "$tlc_transitions"
+
+opam exec -- dune exec tools/dump_ocaml_transitions.exe   | LC_ALL=C sort -u   > "$ocaml_transitions"
+
+echo "TLC transitions:"
+cat "$tlc_transitions"
+
+echo
+echo "OCaml transitions:"
+cat "$ocaml_transitions"
+
+echo
+if ! diff -u "$tlc_transitions" "$ocaml_transitions"; then
+  echo "TLA+ / OCaml transition correspondence failed" >&2
+  exit 1
+fi
+
+echo "TLA+ / OCaml transition correspondence: OK"

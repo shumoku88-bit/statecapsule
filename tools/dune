@@ -1,0 +1,3 @@
+(executable
+ (name dump_ocaml_transitions)
+ (libraries statecapsule.core))

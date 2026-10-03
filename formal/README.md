@@ -41,3 +41,28 @@ that terminal state is expected behavior, not a model failure.
 A successful run qualifies only this bounded three-state model and its configured
 `TypeOK` invariant. It is not evidence for persistence, networking, replay,
 authentication, or the OCaml implementation itself.
+
+
+## OCaml correspondence
+
+The repository also checks the successful transition relation exposed by the OCaml
+core against the state graph that TLC actually explores.
+
+`tools/check-correspondence` asks TLC for a DOT state-graph dump with action labels,
+normalizes the explored successful transitions, independently enumerates every
+OCaml state/command pair, and requires the two resulting relations to be identical.
+
+For this first capsule the expected successful relation is:
+
+```text
+locked  arm      armed
+armed   consume  used
+```
+
+This is deliberately a bounded correspondence check, not a proof that arbitrary
+OCaml code refines arbitrary TLA+ specifications. It says that for the complete
+three-state, two-command space represented here, the model checker and the concrete
+transition function expose the same successful transitions.
+
+Refusal reasons remain an OCaml-level contract and are not represented by the TLA+
+`Next` relation.
