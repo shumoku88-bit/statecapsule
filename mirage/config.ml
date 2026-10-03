@@ -10,6 +10,7 @@ let failure_point =
 let main =
   main "Unikernel.Make"
     ~packages:[ package "statecapsule" ~sublibs:[ "core" ] ]
+    ~runtime_args:[ Runtime_arg.v failure_point ]
     (http_server @-> kv_rw @-> job)
 
 let stackv4v6 = generic_stackv4v6 default_network
@@ -21,5 +22,4 @@ let store = chamelon ~program_block_size block
 
 let () =
   register "statecapsule-http"
-    ~runtime_args:[ Runtime_arg.v failure_point ]
     [ main $ http_server $ store ]
