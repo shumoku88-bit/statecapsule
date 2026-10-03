@@ -48,9 +48,23 @@ The bounded TLA+ model uses two request ids and both commands to check:
 There is still no persistence. Restarting the process forgets all request ids and
 resets the capsule to `Locked`.
 
-There is also no:
+The MirageOS HTTP boundary now maps this contract to the `Idempotency-Key`
+request header for mutating POST endpoints:
 
-- HTTP request-id header contract,
+```text
+POST /arm
+Idempotency-Key: arm-1
+
+POST /consume
+Idempotency-Key: consume-1
+```
+
+Missing or empty keys are rejected before command evaluation. HTTP responses
+distinguish the stored request outcome from the capsule's current state, which is
+important when replaying an old refusal after later state changes.
+
+There is still no:
+
 - authentication or authorization,
 - distributed or multi-replica coordination,
 - retention or garbage-collection policy for request ids,
