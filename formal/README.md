@@ -85,3 +85,25 @@ can create a second successful consume.
 
 This model is intentionally separate from `StateCapsule.tla` so the original
 state-transition correspondence check remains small and mechanically transparent.
+
+
+## Persistence and crash recovery model
+
+`CrashRecovery.tla` models the next boundary before any storage implementation is
+chosen. It separates visible state, volatile working state, prepared durable data,
+the committed durable state/receipt pair, crashes, and recovery.
+
+CI runs:
+
+```sh
+bash tools/check-crash-recovery-tla
+```
+
+The model permits a crash at every request phase. A commit makes state and its
+request receipt durable together; publication occurs only afterwards. A crash
+after commit but before response therefore recovers the receipt and turns the
+retry into replay rather than re-execution. If recovery cannot establish an
+authoritative committed pair, the model enters a terminal fail-closed state.
+
+See `docs/CRASH_RECOVERY_MODEL.md` for the storage contract derived from the
+model and for the limits of the claim.
