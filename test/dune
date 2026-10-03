@@ -1,0 +1,3 @@
+(test
+ (name state_tests)
+ (libraries statecapsule.core alcotest))
