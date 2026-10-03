@@ -5,6 +5,16 @@ TLA_VERSION="1.7.2"
 TLA_SHA1="7f21faa2cdae3189e7d5fadb4488f0dfcc658407"
 TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v${TLA_VERSION}/tla2tools.jar"
 
+dump_args=()
+if [[ "$#" -eq 0 ]]; then
+  :
+elif [[ "$#" -eq 2 && "$1" == "--dump-dot" ]]; then
+  dump_args=(-dump dot,actionlabels "$2")
+else
+  echo "usage: check-tla [--dump-dot OUTPUT.dot]" >&2
+  exit 2
+fi
+
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 jar="$workdir/tla2tools.jar"
@@ -21,5 +31,5 @@ fi
 
 (
   cd formal
-  java -cp "$jar" tlc2.TLC     -deadlock     -workers 1     -config StateCapsule.cfg     StateCapsule.tla
+  java -cp "$jar" tlc2.TLC     -deadlock     -workers 1     "${dump_args[@]}"     -config StateCapsule.cfg     StateCapsule.tla
 )
