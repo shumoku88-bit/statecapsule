@@ -23,7 +23,7 @@ opam install mirage.4.11.2
 (
   cd mirage
   opam exec -- mirage configure -t unix --net socket
-  make depends
+  opam exec -- make depends
   opam exec -- dune build
 )
 
