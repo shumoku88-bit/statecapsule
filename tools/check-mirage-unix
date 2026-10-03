@@ -18,6 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+opam install .
 opam install mirage.4.11.2
 
 (
