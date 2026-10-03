@@ -17,7 +17,7 @@ let check_state expected machine =
   Alcotest.check state "state" expected (Request.state machine)
 
 let check_seen expected machine =
-  Alcotest.check int "seen requests" expected (Request.seen_count machine)
+  Alcotest.check Alcotest.int "seen requests" expected (Request.seen_count machine)
 
 let test_fresh_success_is_recorded () =
   let machine, actual =
