@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TLA_VERSION="1.7.2"
+TLA_SHA1="7f21faa2cdae3189e7d5fadb4488f0dfcc658407"
+TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v${TLA_VERSION}/tla2tools.jar"
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+jar="$workdir/tla2tools.jar"
+
+curl --fail --location --silent --show-error "$TLA_URL" --output "$jar"
+
+actual_sha1="$(sha1sum "$jar" | awk '{print $1}')"
+if [[ "$actual_sha1" != "$TLA_SHA1" ]]; then
+  echo "tla2tools.jar checksum mismatch" >&2
+  echo "expected: $TLA_SHA1" >&2
+  echo "actual:   $actual_sha1" >&2
+  exit 1
+fi
+
+(
+  cd formal
+  java -cp "$jar" tlc2.TLC     -deadlock     -workers 1     -config RequestReplay.cfg     RequestReplay.tla
+)
