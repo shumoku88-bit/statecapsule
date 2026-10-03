@@ -1,0 +1,28 @@
+name: MirageOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unix-http:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.3"
+
+      - name: Install core dependencies
+        run: opam install . --deps-only --with-test
+
+      - name: Build and smoke test MirageOS HTTP adapter
+        run: bash tools/check-mirage-unix
