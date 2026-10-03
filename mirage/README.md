@@ -1,7 +1,8 @@
 # MirageOS adapter
 
 This directory exposes the existing StateCapsule core through a deliberately tiny
-HTTP boundary.
+HTTP boundary and persists one authoritative request-machine snapshot through a
+Chamelon `Mirage_kv.RW` store.
 
 Endpoints:
 
@@ -9,105 +10,131 @@ Endpoints:
 - `POST /arm`
 - `POST /consume`
 
-The adapter does not implement any new state-transition semantics. Successful and
-refused transitions still come from `Statecapsule_core.State.apply`.
+The adapter does not implement transition or replay semantics. Those remain in
+`Statecapsule_core`.
+
+## Persistent snapshot
+
+The MirageOS adapter stores exactly one key:
+
+```text
+/capsule
+```
+
+The value contains the state plus the complete request receipt history as one
+versioned, checksummed core snapshot. A fresh mutation is evaluated in memory,
+then the complete next snapshot is committed with one `Store.set`. Only after
+that call succeeds does the adapter publish the new in-memory state and HTTP
+response.
+
+Replays and id conflicts do not write storage because they do not change the
+request machine.
+
+On restore, the core checks the checksum and replays every receipt from
+`Locked` to verify that all recorded outcomes and the final state agree with the
+pure state machine. Invalid persistent data causes startup to fail closed.
+
+The checksum detects accidental corruption; it is not authentication or a
+security boundary.
 
 ## Development target
 
-The first qualified target is MirageOS Unix with host/socket networking:
+Create a fresh Chamelon image, configure MirageOS Unix, and run the service:
 
 ```sh
 opam install .
-opam install mirage.4.11.2
+opam install mirage.4.11.2 chamelon-unix
+bash tools/create-capsule-image capsule
+
 cd mirage
 mirage configure -t unix --net socket
 make depends
 dune build
-./dist/statecapsule-http --port 8080
+cd ..
+
+./mirage/dist/statecapsule-http --port 8080
 ```
 
-Then, from another terminal:
+The Unix block adapter opens `capsule` from the process working directory.
 
-```sh
-curl http://127.0.0.1:8080/state
-curl -X POST -H 'Idempotency-Key: arm-1' http://127.0.0.1:8080/arm
-curl -X POST -H 'Idempotency-Key: consume-1' http://127.0.0.1:8080/consume
+## Qualified reboot behavior
+
+`tools/check-mirage-unix` and `tools/check-mirage-hvt-runtime` use the same
+backing image across process/guest restarts and verify:
+
+```text
+fresh image
+  -> Locked
+
+Consume id=too-early
+  -> fresh Refused(not_armed)
+
+Arm id=arm-1
+  -> fresh Applied(Armed)
+
+restart with same image
+  -> Armed
+  -> too-early replays Refused(not_armed)
+  -> arm-1 replays Applied(Armed)
+
+Consume id=consume-1
+  -> fresh Applied(Used)
+
+restart with same image
+  -> Used
+  -> consume-1 replays Applied(Used)
 ```
+
+The checks then overwrite `/capsule` with malformed content and require the
+next boot to terminate rather than silently reset to `Locked`.
 
 ## hvt artifact
 
-The same adapter can also be cross-compiled as a Solo5 `hvt` unikernel:
+The adapter can be cross-compiled as a Solo5 `hvt` unikernel:
 
 ```sh
 bash tools/build-mirage-hvt
 ```
 
-A successful build produces:
-
-```text
-mirage/dist/statecapsule-http.hvt
-```
-
-CI verifies that the file exists, records its SHA-256 digest, and asks
-`solo5-elftool query-manifest` to inspect the embedded Solo5 application
-manifest. The workflow also uploads the resulting `.hvt` file as a GitHub
-Actions artifact.
-
-This qualifies **artifact construction**, not boot. Running an `hvt` network
-unikernel requires a suitable Solo5 tender plus a host network device such as a
-TAP interface. That runtime boundary is intentionally separate from this build
-check.
-
-## hvt runtime check
-
-The repository can also attempt to boot the generated hvt artifact on Linux and
-drive the same HTTP state transition path through a private TAP network:
+The embedded Solo5 manifest now includes both the network interface and the
+named `capsule` block device. At runtime the tender must attach a formatted
+image:
 
 ```sh
-bash tools/check-mirage-hvt-runtime
+solo5-hvt \
+  --net:service=<tap> \
+  --block:capsule=<image> \
+  -- mirage/dist/statecapsule-http.hvt ...
 ```
 
-The check creates a temporary host-only bridge and TAP device, boots the
-unikernel with `solo5-hvt`, assigns the guest a private static IPv4 address,
-and verifies:
+## What the runtime evidence establishes
 
-```text
-GET  /state                         -> locked
-POST /arm without key               -> HTTP 400
-POST /consume key=too-early         -> fresh 409 / not_armed
-POST /arm key=arm-1                 -> fresh applied / armed
-POST /consume key=too-early         -> replay 409 / not_armed
-POST /arm key=arm-1                 -> replay applied / armed
-POST /consume key=arm-1             -> HTTP 409 / id_conflict
-POST /consume key=consume-1         -> fresh applied / used
-POST /consume key=consume-1         -> replay applied / used
-GET  /state                         -> used
-```
+A green Unix or hvt runtime check is evidence, for that concrete runner and
+backing image, that:
 
-This check requires `/dev/kvm`. GitHub-hosted runners may expose nested
-virtualization, but GitHub documents it as experimental and unsupported.
-Therefore a green CI run is evidence for the concrete runner used by that run,
-not a portability guarantee for all hosted runners.
+- state survives a process/guest restart,
+- refusal receipts survive and replay,
+- successful transition receipts survive and replay,
+- a successful consume is not re-evaluated after restart,
+- malformed snapshot content fails closed.
 
-The TAP network is private to the CI host and does not expose the service to the
-public Internet.
+## Important durability limit
 
-## Important limits
+This does **not** yet establish host-power-loss durability.
 
-This is **not** a remotely safe service.
+The current Solo5 hvt block path ultimately services writes with host
+`pwrite()`, and the exposed `Mirage_block.S` interface does not provide an
+explicit host flush/barrier operation that StateCapsule can point to.
 
-There is currently:
+Therefore this milestone qualifies guest/tender/process restart continuity only.
+It does not claim survival of host-kernel crash, host power loss, host page-cache
+loss, or storage-controller cache loss.
 
-- no TLS
-- no authentication or authorization
-- no persistence
-- no crash or reboot continuity
-- no multi-replica semantics
+There is still no:
 
-The mutable reference in `unikernel.ml` belongs to the runtime adapter. It keeps
-one process-local request machine containing the current state and seen request ids.
-The request identity rules themselves remain in the pure core.
-
-Restarting the process resets the capsule to `Locked`.
+- TLS,
+- authentication or authorization,
+- multi-replica semantics,
+- public-Internet safety.
 
 Do not expose this HTTP service to the public Internet.

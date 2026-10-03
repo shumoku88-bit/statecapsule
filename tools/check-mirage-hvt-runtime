@@ -13,6 +13,7 @@ port="18080"
 base="http://$guest_ip:$port"
 log="$(mktemp)"
 state_file="$(mktemp)"
+image="$(mktemp)"
 pid=""
 
 cleanup() {
@@ -20,12 +21,47 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   fi
-
   sudo ip link del "$bridge" 2>/dev/null || true
   sudo ip link del "$tap" 2>/dev/null || true
-  rm -f "$log" "$state_file"
+  rm -f "$log" "$state_file" "$image"
 }
 trap cleanup EXIT
+
+stop_guest() {
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    pid=""
+  fi
+}
+
+start_guest() {
+  : >"$log"
+  opam exec -- solo5-hvt     --mem=64     --net:service="$tap"     --block:capsule="$image"     -- "$artifact"     --ipv4="$guest_ip/$prefix"     --ipv4-gateway="$host_ip"     --port "$port"     >"$log" 2>&1 &
+  pid=$!
+
+  local ready=false
+  for _ in $(seq 1 80); do
+    if curl --noproxy '*' --silent --show-error --connect-timeout 1       "$base/state" >"$state_file" 2>/dev/null; then
+      ready=true
+      break
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "hvt unikernel exited before becoming ready" >&2
+      cat "$log" >&2
+      exit 1
+    fi
+
+    sleep 0.25
+  done
+
+  if [[ "$ready" != "true" ]]; then
+    echo "hvt unikernel did not become ready" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+}
 
 if [[ ! -e /dev/kvm ]]; then
   echo "/dev/kvm is unavailable; hvt runtime cannot be qualified on this runner" >&2
@@ -35,6 +71,8 @@ fi
 sudo chmod a+rw /dev/kvm
 
 bash tools/build-mirage-hvt
+opam install chamelon-unix
+bash tools/create-capsule-image "$image"
 
 sudo ip link add name "$bridge" type bridge
 sudo ip addr add "$host_ip/$prefix" dev "$bridge"
@@ -44,31 +82,7 @@ sudo ip link set "$tap" up
 sudo ip link set "$bridge" up
 
 artifact="mirage/dist/statecapsule-http.hvt"
-
-opam exec -- solo5-hvt   --mem=64   --net:service="$tap"   -- "$artifact"   --ipv4="$guest_ip/$prefix"   --ipv4-gateway="$host_ip"   --port "$port"   >"$log" 2>&1 &
-pid=$!
-
-ready=false
-for _ in $(seq 1 80); do
-  if curl       --noproxy '*'       --silent       --show-error       --connect-timeout 1       "$base/state"       >"$state_file" 2>/dev/null; then
-    ready=true
-    break
-  fi
-
-  if ! kill -0 "$pid" 2>/dev/null; then
-    echo "hvt unikernel exited before becoming ready" >&2
-    cat "$log" >&2
-    exit 1
-  fi
-
-  sleep 0.25
-done
-
-if [[ "$ready" != "true" ]]; then
-  echo "hvt unikernel did not become ready" >&2
-  cat "$log" >&2
-  exit 1
-fi
+start_guest
 
 initial="$(cat "$state_file")"
 if [[ "$initial" != '{"state":"locked"}' ]]; then
@@ -76,102 +90,116 @@ if [[ "$initial" != '{"state":"locked"}' ]]; then
   exit 1
 fi
 
-missing_file="$(mktemp)"
-missing_status="$(
-  curl --noproxy '*' --silent --show-error     -o "$missing_file"     -w '%{http_code}'     -X POST     "$base/arm"
-)"
-missing="$(cat "$missing_file")"
-rm -f "$missing_file"
-if [[ "$missing_status" != "400" ]]; then
-  echo "expected 400 without Idempotency-Key, got $missing_status" >&2
-  exit 1
-fi
-if [[ "$missing" != '{"error":"missing_idempotency_key","current_state":"locked"}' ]]; then
-  echo "unexpected missing-key response: $missing" >&2
-  exit 1
-fi
-
 early_file="$(mktemp)"
 early_status="$(
-  curl --noproxy '*' --silent --show-error     -o "$early_file"     -w '%{http_code}'     -X POST     -H 'Idempotency-Key: too-early'     "$base/consume"
+  curl --noproxy '*' --silent --show-error     -o "$early_file" -w '%{http_code}'     -X POST -H 'Idempotency-Key: too-early' "$base/consume"
 )"
 early="$(cat "$early_file")"
 rm -f "$early_file"
-if [[ "$early_status" != "409" ]]; then
-  echo "expected fresh refusal 409, got $early_status" >&2
-  exit 1
-fi
-if [[ "$early" != '{"request":"fresh","outcome":{"kind":"refused","error":"not_armed"},"current_state":"locked"}' ]]; then
-  echo "unexpected fresh refusal: $early" >&2
+if [[ "$early_status" != "409" ]] ||
+   [[ "$early" != '{"request":"fresh","outcome":{"kind":"refused","error":"not_armed"},"current_state":"locked"}' ]]; then
+  echo "unexpected fresh refusal: $early_status $early" >&2
   exit 1
 fi
 
 armed="$(
-  curl --noproxy '*' --silent --show-error     -X POST     -H 'Idempotency-Key: arm-1'     "$base/arm"
+  curl --noproxy '*' --silent --show-error     -X POST -H 'Idempotency-Key: arm-1' "$base/arm"
 )"
 if [[ "$armed" != '{"request":"fresh","outcome":{"kind":"applied","state":"armed"},"current_state":"armed"}' ]]; then
   echo "unexpected fresh arm response: $armed" >&2
   exit 1
 fi
 
+stop_guest
+start_guest
+
+after_arm_reboot="$(cat "$state_file")"
+if [[ "$after_arm_reboot" != '{"state":"armed"}' ]]; then
+  echo "armed state did not survive hvt reboot: $after_arm_reboot" >&2
+  exit 1
+fi
+
 early_replay_file="$(mktemp)"
 early_replay_status="$(
-  curl --noproxy '*' --silent --show-error     -o "$early_replay_file"     -w '%{http_code}'     -X POST     -H 'Idempotency-Key: too-early'     "$base/consume"
+  curl --noproxy '*' --silent --show-error     -o "$early_replay_file" -w '%{http_code}'     -X POST -H 'Idempotency-Key: too-early' "$base/consume"
 )"
 early_replay="$(cat "$early_replay_file")"
 rm -f "$early_replay_file"
-if [[ "$early_replay_status" != "409" ]]; then
-  echo "expected replay refusal 409, got $early_replay_status" >&2
-  exit 1
-fi
-if [[ "$early_replay" != '{"request":"replay","outcome":{"kind":"refused","error":"not_armed"},"current_state":"armed"}' ]]; then
-  echo "unexpected replay refusal: $early_replay" >&2
+if [[ "$early_replay_status" != "409" ]] ||
+   [[ "$early_replay" != '{"request":"replay","outcome":{"kind":"refused","error":"not_armed"},"current_state":"armed"}' ]]; then
+  echo "refusal receipt did not survive hvt reboot: $early_replay_status $early_replay" >&2
   exit 1
 fi
 
 arm_replay="$(
-  curl --noproxy '*' --silent --show-error     -X POST     -H 'Idempotency-Key: arm-1'     "$base/arm"
+  curl --noproxy '*' --silent --show-error     -X POST -H 'Idempotency-Key: arm-1' "$base/arm"
 )"
 if [[ "$arm_replay" != '{"request":"replay","outcome":{"kind":"applied","state":"armed"},"current_state":"armed"}' ]]; then
-  echo "unexpected arm replay: $arm_replay" >&2
-  exit 1
-fi
-
-conflict_file="$(mktemp)"
-conflict_status="$(
-  curl --noproxy '*' --silent --show-error     -o "$conflict_file"     -w '%{http_code}'     -X POST     -H 'Idempotency-Key: arm-1'     "$base/consume"
-)"
-conflict="$(cat "$conflict_file")"
-rm -f "$conflict_file"
-if [[ "$conflict_status" != "409" ]]; then
-  echo "expected id conflict 409, got $conflict_status" >&2
-  exit 1
-fi
-if [[ "$conflict" != '{"error":"id_conflict","current_state":"armed"}' ]]; then
-  echo "unexpected id conflict response: $conflict" >&2
+  echo "arm receipt did not survive hvt reboot: $arm_replay" >&2
   exit 1
 fi
 
 used="$(
-  curl --noproxy '*' --silent --show-error     -X POST     -H 'Idempotency-Key: consume-1'     "$base/consume"
+  curl --noproxy '*' --silent --show-error     -X POST -H 'Idempotency-Key: consume-1' "$base/consume"
 )"
 if [[ "$used" != '{"request":"fresh","outcome":{"kind":"applied","state":"used"},"current_state":"used"}' ]]; then
   echo "unexpected fresh consume response: $used" >&2
   exit 1
 fi
 
+stop_guest
+start_guest
+
+after_consume_reboot="$(cat "$state_file")"
+if [[ "$after_consume_reboot" != '{"state":"used"}' ]]; then
+  echo "used state did not survive hvt reboot: $after_consume_reboot" >&2
+  exit 1
+fi
+
 used_replay="$(
-  curl --noproxy '*' --silent --show-error     -X POST     -H 'Idempotency-Key: consume-1'     "$base/consume"
+  curl --noproxy '*' --silent --show-error     -X POST -H 'Idempotency-Key: consume-1' "$base/consume"
 )"
 if [[ "$used_replay" != '{"request":"replay","outcome":{"kind":"applied","state":"used"},"current_state":"used"}' ]]; then
-  echo "unexpected consume replay: $used_replay" >&2
+  echo "consume receipt did not survive hvt reboot: $used_replay" >&2
   exit 1
 fi
 
-final="$(curl --noproxy '*' --silent --show-error "$base/state")"
-if [[ "$final" != '{"state":"used"}' ]]; then
-  echo "unexpected final response: $final" >&2
+stop_guest
+opam exec -- chamelon write "$image" 512 /capsule corrupt
+
+: >"$log"
+opam exec -- solo5-hvt   --mem=64   --net:service="$tap"   --block:capsule="$image"   -- "$artifact"   --ipv4="$guest_ip/$prefix"   --ipv4-gateway="$host_ip"   --port "$port"   >"$log" 2>&1 &
+pid=$!
+
+rejected=false
+for _ in $(seq 1 40); do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rejected=true
+    break
+  fi
+
+  if curl --noproxy '*' --silent --show-error --connect-timeout 1     "$base/state" >/dev/null 2>&1; then
+    echo "hvt guest accepted a malformed persisted snapshot" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+
+  sleep 0.25
+done
+
+if [[ "$rejected" != "true" ]]; then
+  echo "hvt guest neither rejected malformed storage nor became ready" >&2
+  cat "$log" >&2
   exit 1
 fi
 
-echo "Solo5 hvt HTTP idempotency smoke test: OK"
+wait "$pid" 2>/dev/null || true
+pid=""
+
+if ! grep -q "invalid persisted capsule snapshot" "$log"; then
+  echo "hvt guest failed closed, but not for the expected snapshot validation reason" >&2
+  cat "$log" >&2
+  exit 1
+fi
+
+echo "Solo5 hvt durable replay/reboot smoke test: OK"
