@@ -13,16 +13,15 @@ The model currently covers only the pure state machine. It does not cover:
 - authentication or authorization
 - persistence
 - process crashes or reboot
-- request identity or replay
 - multiple replicas
 - clocks or timeouts
 
 The correspondence claim is intentionally small: the OCaml transition table and
 the TLA+ Next relation should admit the same successful state changes.
 
-Before a remote or durable capsule exists, extend the specification for request
-identity, replay, persistence, and crash semantics instead of treating this model
-as evidence for those properties.
+Request identity and replay now have a separate bounded model in
+`RequestReplay.tla`. Persistence and crash semantics remain outside both models
+and must be specified before a durable capsule exists.
 
 
 ## Model checking
@@ -66,3 +65,23 @@ transition function expose the same successful transitions.
 
 Refusal reasons remain an OCaml-level contract and are not represented by the TLA+
 `Next` relation.
+
+
+## Request replay model
+
+`RequestReplay.tla` adds a separate bounded state space for request identity and
+retry semantics. It uses two request ids and both commands so TLC can explore fresh
+requests, same-payload replays, and conflicting payload reuse.
+
+CI runs:
+
+```sh
+bash tools/check-request-replay-tla
+```
+
+The configured invariants check that request ids remain uniquely bound, replays
+echo stored outcomes, conflicts correspond to payload mismatch, and no retry path
+can create a second successful consume.
+
+This model is intentionally separate from `StateCapsule.tla` so the original
+state-transition correspondence check remains small and mechanically transparent.
