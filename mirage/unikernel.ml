@@ -6,19 +6,41 @@ let port =
 
 module Make (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t) = struct
   module State = Statecapsule_core.State
+  module Request = Statecapsule_core.Request_machine
 
-  let current = ref State.initial
+  let current = ref Request.initial
+
+  let current_state_string () =
+    State.to_string (Request.state !current)
 
   let json_state () =
     Printf.sprintf {|{"state":"%s"}
-|} (State.to_string !current)
+|} (current_state_string ())
 
-  let json_refusal refusal =
+  let json_outcome = function
+    | Request.Applied state ->
+        Printf.sprintf
+          {|{"kind":"applied","state":"%s"}|}
+          (State.to_string state)
+    | Request.Refused refusal ->
+        Printf.sprintf
+          {|{"kind":"refused","error":"%s"}|}
+          (State.refusal_to_string refusal)
+
+  let json_request kind outcome =
     Printf.sprintf
-      {|{"error":"%s","state":"%s"}
+      {|{"request":"%s","outcome":%s,"current_state":"%s"}
 |}
-      (State.refusal_to_string refusal)
-      (State.to_string !current)
+      kind
+      (json_outcome outcome)
+      (current_state_string ())
+
+  let json_error error =
+    Printf.sprintf
+      {|{"error":"%s","current_state":"%s"}
+|}
+      error
+      (current_state_string ())
 
   let respond reqd status body =
     let headers =
@@ -31,13 +53,34 @@ module Make (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t) = struct
     let response = H1.Response.create ~headers status in
     H1.Reqd.respond_with_string reqd response body
 
-  let apply reqd command =
-    match State.apply !current command with
-    | Ok next ->
-        current := next;
-        respond reqd `OK (json_state ())
-    | Error refusal ->
-        respond reqd `Conflict (json_refusal refusal)
+  let respond_outcome reqd kind outcome =
+    let status =
+      match outcome with
+      | Request.Applied _ -> `OK
+      | Request.Refused _ -> `Conflict
+    in
+    respond reqd status (json_request kind outcome)
+
+  let submit reqd request command =
+    match H1.Headers.get request.H1.Request.headers "idempotency-key" with
+    | None ->
+        respond reqd `Bad_request (json_error "missing_idempotency_key")
+    | Some raw_request_id ->
+        let request_id = String.trim raw_request_id in
+        if String.equal request_id "" then
+          respond reqd `Bad_request (json_error "missing_idempotency_key")
+        else
+          let next, response =
+            Request.submit !current ~request_id command
+          in
+          current := next;
+          match response with
+          | Request.Fresh outcome ->
+              respond_outcome reqd "fresh" outcome
+          | Request.Replay outcome ->
+              respond_outcome reqd "replay" outcome
+          | Request.Id_conflict ->
+              respond reqd `Conflict (json_error "id_conflict")
 
   let request_handler _flow (_ipaddr, _port) reqd =
     let request = H1.Reqd.request reqd in
@@ -46,9 +89,9 @@ module Make (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t) = struct
     | `GET, "/state" ->
         respond reqd `OK (json_state ())
     | `POST, "/arm" ->
-        apply reqd State.Arm
+        submit reqd request State.Arm
     | `POST, "/consume" ->
-        apply reqd State.Consume
+        submit reqd request State.Consume
     | _ ->
         respond reqd `Not_found {|{"error":"not_found"}
 |}
