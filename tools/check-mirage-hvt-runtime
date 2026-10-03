@@ -15,6 +15,7 @@ log="$(mktemp)"
 state_file="$(mktemp)"
 image="$(mktemp)"
 pid=""
+curl_pid=""
 
 cleanup() {
   if [[ -n "$pid" ]]; then
@@ -245,10 +246,11 @@ start_guest before-commit
 expect_state_file '{"state":"locked"}'
 
 before_output="$(mktemp)"
-before_curl_pid="$(post_arm_in_background crash-before "$before_output")"
+post_arm_in_background crash-before "$before_output"
 wait_for_failpoint before-commit
 stop_guest
-wait "$before_curl_pid" 2>/dev/null || true
+wait "$curl_pid" 2>/dev/null || true
+curl_pid=""
 rm -f "$before_output"
 
 start_guest
@@ -269,10 +271,11 @@ start_guest after-commit-before-publish
 expect_state_file '{"state":"locked"}'
 
 after_output="$(mktemp)"
-after_curl_pid="$(post_arm_in_background crash-after "$after_output")"
+post_arm_in_background crash-after "$after_output"
 wait_for_failpoint after-commit-before-publish
 stop_guest
-wait "$after_curl_pid" 2>/dev/null || true
+wait "$curl_pid" 2>/dev/null || true
+curl_pid=""
 rm -f "$after_output"
 
 start_guest
