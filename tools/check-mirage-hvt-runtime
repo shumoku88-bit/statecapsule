@@ -15,8 +15,13 @@ log="$(mktemp)"
 state_file="$(mktemp)"
 image="$(mktemp)"
 pid=""
+curl_pid=""
 
 cleanup() {
+  if [[ -n "$curl_pid" ]]; then
+    kill "$curl_pid" 2>/dev/null || true
+    wait "$curl_pid" 2>/dev/null || true
+  fi
   if [[ -n "$pid" ]]; then
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -35,9 +40,16 @@ stop_guest() {
   fi
 }
 
+fresh_image() {
+  stop_guest
+  bash tools/create-capsule-image "$image"
+}
+
 start_guest() {
+  local failure_point="${1:-none}"
   : >"$log"
-  opam exec -- solo5-hvt     --mem=64     --net:service="$tap"     --block:capsule="$image"     -- "$artifact"     --ipv4="$guest_ip/$prefix"     --ipv4-gateway="$host_ip"     --port "$port"     >"$log" 2>&1 &
+
+  opam exec -- solo5-hvt     --mem=64     --net:service="$tap"     --block:capsule="$image"     -- "$artifact"     --ipv4="$guest_ip/$prefix"     --ipv4-gateway="$host_ip"     --port "$port"     --failure-point "$failure_point"     >"$log" 2>&1 &
   pid=$!
 
   local ready=false
@@ -63,6 +75,48 @@ start_guest() {
   fi
 }
 
+wait_for_failpoint() {
+  local expected="$1"
+  local marker="STATECAPSULE_FAILPOINT $expected"
+
+  for _ in $(seq 1 80); do
+    if grep -q "$marker" "$log"; then
+      return 0
+    fi
+
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+      echo "hvt guest exited before failpoint $expected" >&2
+      cat "$log" >&2
+      exit 1
+    fi
+
+    sleep 0.25
+  done
+
+  echo "did not observe failpoint $expected" >&2
+  cat "$log" >&2
+  exit 1
+}
+
+post_arm_in_background() {
+  local request_id="$1"
+  local output="$2"
+
+  curl --noproxy '*' --silent --show-error --max-time 20     -o "$output"     -X POST     -H "Idempotency-Key: $request_id"     "$base/arm" &
+  echo $!
+}
+
+expect_state_file() {
+  local expected="$1"
+  local actual
+  actual="$(cat "$state_file")"
+
+  if [[ "$actual" != "$expected" ]]; then
+    echo "unexpected state response: $actual" >&2
+    exit 1
+  fi
+}
+
 if [[ ! -e /dev/kvm ]]; then
   echo "/dev/kvm is unavailable; hvt runtime cannot be qualified on this runner" >&2
   exit 1
@@ -82,13 +136,10 @@ sudo ip link set "$tap" up
 sudo ip link set "$bridge" up
 
 artifact="mirage/dist/statecapsule-http.hvt"
-start_guest
 
-initial="$(cat "$state_file")"
-if [[ "$initial" != '{"state":"locked"}' ]]; then
-  echo "unexpected initial response: $initial" >&2
-  exit 1
-fi
+# Ordinary durable replay / reboot path.
+start_guest
+expect_state_file '{"state":"locked"}'
 
 early_file="$(mktemp)"
 early_status="$(
@@ -112,12 +163,7 @@ fi
 
 stop_guest
 start_guest
-
-after_arm_reboot="$(cat "$state_file")"
-if [[ "$after_arm_reboot" != '{"state":"armed"}' ]]; then
-  echo "armed state did not survive hvt reboot: $after_arm_reboot" >&2
-  exit 1
-fi
+expect_state_file '{"state":"armed"}'
 
 early_replay_file="$(mktemp)"
 early_replay_status="$(
@@ -149,12 +195,7 @@ fi
 
 stop_guest
 start_guest
-
-after_consume_reboot="$(cat "$state_file")"
-if [[ "$after_consume_reboot" != '{"state":"used"}' ]]; then
-  echo "used state did not survive hvt reboot: $after_consume_reboot" >&2
-  exit 1
-fi
+expect_state_file '{"state":"used"}'
 
 used_replay="$(
   curl --noproxy '*' --silent --show-error     -X POST -H 'Idempotency-Key: consume-1' "$base/consume"
@@ -164,6 +205,7 @@ if [[ "$used_replay" != '{"request":"replay","outcome":{"kind":"applied","state"
   exit 1
 fi
 
+# Malformed durable data must fail closed.
 stop_guest
 opam exec -- chamelon write "$image" 512 /capsule corrupt
 
@@ -202,4 +244,53 @@ if ! grep -q "invalid persisted capsule snapshot" "$log"; then
   exit 1
 fi
 
-echo "Solo5 hvt durable replay/reboot smoke test: OK"
+# Crash before the concrete KV commit: candidate state/receipt must disappear.
+fresh_image
+start_guest before-commit
+expect_state_file '{"state":"locked"}'
+
+before_output="$(mktemp)"
+post_arm_in_background crash-before "$before_output"
+wait_for_failpoint before-commit
+stop_guest
+wait "$curl_pid" 2>/dev/null || true
+curl_pid=""
+rm -f "$before_output"
+
+start_guest
+expect_state_file '{"state":"locked"}'
+
+before_retry="$(
+  curl --noproxy '*' --silent --show-error     -X POST -H 'Idempotency-Key: crash-before' "$base/arm"
+)"
+if [[ "$before_retry" != '{"request":"fresh","outcome":{"kind":"applied","state":"armed"},"current_state":"armed"}' ]]; then
+  echo "pre-commit retry was not fresh after recovery: $before_retry" >&2
+  exit 1
+fi
+
+# Crash after Store.set returned Ok but before visible state / HTTP publish:
+# committed state and receipt must recover, and retry must replay.
+fresh_image
+start_guest after-commit-before-publish
+expect_state_file '{"state":"locked"}'
+
+after_output="$(mktemp)"
+post_arm_in_background crash-after "$after_output"
+wait_for_failpoint after-commit-before-publish
+stop_guest
+wait "$curl_pid" 2>/dev/null || true
+curl_pid=""
+rm -f "$after_output"
+
+start_guest
+expect_state_file '{"state":"armed"}'
+
+after_retry="$(
+  curl --noproxy '*' --silent --show-error     -X POST -H 'Idempotency-Key: crash-after' "$base/arm"
+)"
+if [[ "$after_retry" != '{"request":"replay","outcome":{"kind":"applied","state":"armed"},"current_state":"armed"}' ]]; then
+  echo "post-commit retry was not replay after recovery: $after_retry" >&2
+  exit 1
+fi
+
+echo "Solo5 hvt durable replay/reboot/crash-boundary smoke test: OK"

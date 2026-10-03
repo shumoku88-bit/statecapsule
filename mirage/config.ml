@@ -4,10 +4,13 @@ open Mirage
 let port = Runtime_arg.create ~pos:__POS__ "Unikernel.port"
 let program_block_size =
   Runtime_arg.create ~pos:__POS__ "Unikernel.program_block_size"
+let failure_point : string runtime_arg =
+  Runtime_arg.create ~pos:__POS__ "Unikernel.failure_point"
 
 let main =
   main "Unikernel.Make"
     ~packages:[ package "statecapsule" ~sublibs:[ "core" ] ]
+    ~runtime_args:[ Runtime_arg.v failure_point ]
     (http_server @-> kv_rw @-> job)
 
 let stackv4v6 = generic_stackv4v6 default_network
