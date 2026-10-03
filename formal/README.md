@@ -107,3 +107,23 @@ authoritative committed pair, the model enters a terminal fail-closed state.
 
 See `docs/CRASH_RECOVERY_MODEL.md` for the storage contract derived from the
 model and for the limits of the claim.
+
+
+## Split-commit negative control
+
+`SplitCommitCounterexample.tla` deliberately removes the atomic state/receipt
+commit assumption. Two TLC configurations persist state first or receipt first,
+crash between the writes, and require TLC to exhibit the resulting recovered
+inconsistency.
+
+CI runs:
+
+```sh
+bash tools/check-split-commit-counterexample
+```
+
+Unlike the positive models, this check succeeds only when TLC finds the expected
+counterexamples. It exists to show that the atomic durable-pair requirement in the
+crash-recovery model is doing real work rather than merely restating a preference.
+
+See `docs/SPLIT_COMMIT_COUNTEREXAMPLE.md`.
