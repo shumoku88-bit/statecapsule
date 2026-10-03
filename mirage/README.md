@@ -30,8 +30,8 @@ Then, from another terminal:
 
 ```sh
 curl http://127.0.0.1:8080/state
-curl -X POST http://127.0.0.1:8080/arm
-curl -X POST http://127.0.0.1:8080/consume
+curl -X POST -H 'Idempotency-Key: arm-1' http://127.0.0.1:8080/arm
+curl -X POST -H 'Idempotency-Key: consume-1' http://127.0.0.1:8080/consume
 ```
 
 ## hvt artifact
@@ -72,11 +72,16 @@ unikernel with `solo5-hvt`, assigns the guest a private static IPv4 address,
 and verifies:
 
 ```text
-GET  /state      -> locked
-POST /arm        -> armed
-POST /consume    -> used
-POST /consume    -> HTTP 409 / already_used
-GET  /state      -> used
+GET  /state                         -> locked
+POST /arm without key               -> HTTP 400
+POST /consume key=too-early         -> fresh 409 / not_armed
+POST /arm key=arm-1                 -> fresh applied / armed
+POST /consume key=too-early         -> replay 409 / not_armed
+POST /arm key=arm-1                 -> replay applied / armed
+POST /consume key=arm-1             -> HTTP 409 / id_conflict
+POST /consume key=consume-1         -> fresh applied / used
+POST /consume key=consume-1         -> replay applied / used
+GET  /state                         -> used
 ```
 
 This check requires `/dev/kvm`. GitHub-hosted runners may expose nested
@@ -95,14 +100,13 @@ There is currently:
 
 - no TLS
 - no authentication or authorization
-- no request identity or replay protection
 - no persistence
 - no crash or reboot continuity
 - no multi-replica semantics
 
 The mutable reference in `unikernel.ml` belongs to the runtime adapter. It keeps
-one process-local current state so that HTTP requests can drive the already pure
-transition function.
+one process-local request machine containing the current state and seen request ids.
+The request identity rules themselves remain in the pure core.
 
 Restarting the process resets the capsule to `Locked`.
 
