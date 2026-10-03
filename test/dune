@@ -1,3 +1,7 @@
 (test
  (name state_tests)
  (libraries statecapsule.core alcotest))
+
+(test
+ (name request_machine_tests)
+ (libraries statecapsule.core alcotest))
