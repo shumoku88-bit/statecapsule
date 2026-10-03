@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+
+bridge="scbr0"
+tap="sctap0"
+host_ip="10.77.0.1"
+guest_ip="10.77.0.2"
+prefix="24"
+port="18080"
+log="$(mktemp)"
+state_file="$(mktemp)"
+pid=""
+
+cleanup() {
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+
+  sudo ip link del "$bridge" 2>/dev/null || true
+  sudo ip link del "$tap" 2>/dev/null || true
+  rm -f "$log" "$state_file"
+}
+trap cleanup EXIT
+
+if [[ ! -e /dev/kvm ]]; then
+  echo "/dev/kvm is unavailable; hvt runtime cannot be qualified on this runner" >&2
+  exit 1
+fi
+
+sudo chmod a+rw /dev/kvm
+
+bash tools/build-mirage-hvt
+
+sudo ip link add name "$bridge" type bridge
+sudo ip addr add "$host_ip/$prefix" dev "$bridge"
+sudo ip tuntap add dev "$tap" mode tap user "$(id -u)"
+sudo ip link set "$tap" master "$bridge"
+sudo ip link set "$tap" up
+sudo ip link set "$bridge" up
+
+artifact="mirage/dist/statecapsule-http.hvt"
+
+opam exec -- solo5-hvt   --mem=64   --net:service="$tap"   -- "$artifact"   --ipv4="$guest_ip/$prefix"   --ipv4-gateway="$host_ip"   --port "$port"   >"$log" 2>&1 &
+pid=$!
+
+ready=false
+for _ in $(seq 1 80); do
+  if curl       --noproxy '*'       --silent       --show-error       --connect-timeout 1       "http://$guest_ip:$port/state"       >"$state_file" 2>/dev/null; then
+    ready=true
+    break
+  fi
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "hvt unikernel exited before becoming ready" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+
+  sleep 0.25
+done
+
+if [[ "$ready" != "true" ]]; then
+  echo "hvt unikernel did not become ready" >&2
+  cat "$log" >&2
+  exit 1
+fi
+
+initial="$(cat "$state_file")"
+if [[ "$initial" != '{"state":"locked"}' ]]; then
+  echo "unexpected initial response: $initial" >&2
+  cat "$log" >&2
+  exit 1
+fi
+
+armed="$(
+  curl --noproxy '*' --silent --show-error -X POST     "http://$guest_ip:$port/arm"
+)"
+if [[ "$armed" != '{"state":"armed"}' ]]; then
+  echo "unexpected arm response: $armed" >&2
+  exit 1
+fi
+
+used="$(
+  curl --noproxy '*' --silent --show-error -X POST     "http://$guest_ip:$port/consume"
+)"
+if [[ "$used" != '{"state":"used"}' ]]; then
+  echo "unexpected consume response: $used" >&2
+  exit 1
+fi
+
+refusal_file="$(mktemp)"
+status="$(
+  curl     --noproxy '*'     --silent     --show-error     -o "$refusal_file"     -w '%{http_code}'     -X POST     "http://$guest_ip:$port/consume"
+)"
+refusal="$(cat "$refusal_file")"
+rm -f "$refusal_file"
+
+if [[ "$status" != "409" ]]; then
+  echo "expected 409 after terminal consume, got $status" >&2
+  exit 1
+fi
+
+if [[ "$refusal" != '{"error":"already_used","state":"used"}' ]]; then
+  echo "unexpected refusal response: $refusal" >&2
+  exit 1
+fi
+
+final="$(
+  curl --noproxy '*' --silent --show-error     "http://$guest_ip:$port/state"
+)"
+if [[ "$final" != '{"state":"used"}' ]]; then
+  echo "unexpected final response: $final" >&2
+  exit 1
+fi
+
+echo "Solo5 hvt HTTP runtime smoke test: OK"

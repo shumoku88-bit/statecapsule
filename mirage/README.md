@@ -58,6 +58,35 @@ unikernel requires a suitable Solo5 tender plus a host network device such as a
 TAP interface. That runtime boundary is intentionally separate from this build
 check.
 
+## hvt runtime check
+
+The repository can also attempt to boot the generated hvt artifact on Linux and
+drive the same HTTP state transition path through a private TAP network:
+
+```sh
+bash tools/check-mirage-hvt-runtime
+```
+
+The check creates a temporary host-only bridge and TAP device, boots the
+unikernel with `solo5-hvt`, assigns the guest a private static IPv4 address,
+and verifies:
+
+```text
+GET  /state      -> locked
+POST /arm        -> armed
+POST /consume    -> used
+POST /consume    -> HTTP 409 / already_used
+GET  /state      -> used
+```
+
+This check requires `/dev/kvm`. GitHub-hosted runners may expose nested
+virtualization, but GitHub documents it as experimental and unsupported.
+Therefore a green CI run is evidence for the concrete runner used by that run,
+not a portability guarantee for all hosted runners.
+
+The TAP network is private to the CI host and does not expose the service to the
+public Internet.
+
 ## Important limits
 
 This is **not** a remotely safe service.
