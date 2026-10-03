@@ -21,11 +21,7 @@ def unquote_id(value: str) -> str:
 
 
 def unescape_dot_label(value: str) -> str:
-    return (
-        value.replace(r'\"', '"')
-        .replace(r'\n', '\n')
-        .replace(r'\\', '\')
-    )
+    return value.replace(r'\"', '"').replace(r'\n', '\n')
 
 
 def label_from_attrs(attrs: str) -> str | None:
