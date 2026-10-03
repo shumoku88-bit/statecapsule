@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image="${1:-capsule}"
+size_mb="${2:-4}"
+
+rm -f "$image"
+dd if=/dev/zero of="$image" bs=1M count="$size_mb" status=none
+opam exec -- chamelon format "$image" 512

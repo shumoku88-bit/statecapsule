@@ -129,6 +129,80 @@ let test_new_id_observes_current_state () =
   check_state State.Armed machine;
   check_seen 2 machine
 
+let test_snapshot_restores_state_and_replay_history () =
+  let machine, _ =
+    Request.submit Request.initial ~request_id:"too-early" State.Consume
+  in
+  let machine, _ =
+    Request.submit machine ~request_id:"arm-1" State.Arm
+  in
+  let payload = Request.snapshot machine in
+  match Request.restore payload with
+  | Error error ->
+      Alcotest.failf "snapshot restore failed: %s" error
+  | Ok restored ->
+      check_state State.Armed restored;
+      check_seen 2 restored;
+      let restored, early =
+        Request.submit restored ~request_id:"too-early" State.Consume
+      in
+      Alcotest.check
+        response
+        "restored refusal replays"
+        (Request.Replay (Request.Refused State.Not_armed))
+        early;
+      let restored, arm =
+        Request.submit restored ~request_id:"arm-1" State.Arm
+      in
+      Alcotest.check
+        response
+        "restored success replays"
+        (Request.Replay (Request.Applied State.Armed))
+        arm;
+      check_state State.Armed restored;
+      check_seen 2 restored
+
+let test_snapshot_checksum_rejects_corruption () =
+  let machine, _ =
+    Request.submit Request.initial ~request_id:"arm-1" State.Arm
+  in
+  let payload = Request.snapshot machine in
+  let corrupted =
+    if String.length payload = 0 then payload
+    else
+      let bytes = Bytes.of_string payload in
+      Bytes.set bytes 0 'X';
+      Bytes.unsafe_to_string bytes
+  in
+  match Request.restore corrupted with
+  | Ok _ -> Alcotest.fail "corrupt snapshot unexpectedly restored"
+  | Error _ -> ()
+
+let with_recomputed_checksum body =
+  body ^ "\nchecksum=" ^ Digest.to_hex (Digest.string body)
+
+let test_snapshot_semantics_reject_inconsistent_final_state () =
+  let machine, _ =
+    Request.submit Request.initial ~request_id:"arm-1" State.Arm
+  in
+  let payload = Request.snapshot machine in
+  let lines = String.split_on_char '\n' payload in
+  let body_lines =
+    match List.rev lines with
+    | _checksum :: reversed_body -> List.rev reversed_body
+    | [] -> []
+  in
+  let inconsistent_body =
+    body_lines
+    |> List.mapi (fun index line ->
+      if index = 1 then "state=used" else line)
+    |> String.concat "\n"
+  in
+  let inconsistent = with_recomputed_checksum inconsistent_body in
+  match Request.restore inconsistent with
+  | Ok _ -> Alcotest.fail "semantically inconsistent snapshot restored"
+  | Error _ -> ()
+
 let () =
   Alcotest.run
     "request-machine"
@@ -157,5 +231,19 @@ let () =
           "new id observes current state"
           `Quick
           test_new_id_observes_current_state
+      ]
+    ; "snapshot"
+    , [ Alcotest.test_case
+          "restores state and replay history"
+          `Quick
+          test_snapshot_restores_state_and_replay_history
+      ; Alcotest.test_case
+          "checksum rejects corruption"
+          `Quick
+          test_snapshot_checksum_rejects_corruption
+      ; Alcotest.test_case
+          "semantic validation rejects inconsistent state"
+          `Quick
+          test_snapshot_semantics_reject_inconsistent_final_state
       ]
     ]

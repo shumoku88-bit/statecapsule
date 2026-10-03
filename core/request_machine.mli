@@ -32,5 +32,17 @@ val submit :
   State.command ->
   t * response
 
+(** [snapshot t] serializes the complete request machine, including the
+    request receipts needed for replay after recovery. The format contains a
+    version marker and an integrity checksum. The checksum detects accidental
+    corruption; it is not an authentication mechanism. *)
+val snapshot : t -> string
+
+(** [restore payload] validates and reconstructs a snapshot. Validation
+    replays every stored receipt from the initial state and requires the stored
+    final state and every stored outcome to agree with the pure state machine.
+    Invalid, duplicate, corrupt, or semantically inconsistent data is rejected. *)
+val restore : string -> (t, string) result
+
 val outcome_to_string : outcome -> string
 val response_to_string : response -> string

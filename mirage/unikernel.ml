@@ -1,14 +1,29 @@
 open Cmdliner
+open Lwt.Infix
 
 let port =
   let doc = Arg.info ~doc:"Port of the StateCapsule HTTP service." [ "p"; "port" ] in
   Arg.(value & opt int 8080 doc)
 
-module Make (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t) = struct
+let program_block_size =
+  let doc =
+    Arg.info
+      ~doc:"Program block size used by the Chamelon persistent store."
+      [ "program-block-size" ]
+  in
+  Arg.(value & opt int 16 doc)
+
+module Make
+    (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t)
+    (Store : Mirage_kv.RW) =
+struct
   module State = Statecapsule_core.State
   module Request = Statecapsule_core.Request_machine
 
+  let capsule_key = Mirage_kv.Key.v "/capsule"
   let current = ref Request.initial
+  let blocked = ref false
+  let mutation_lock = Lwt_mutex.create ()
 
   let current_state_string () =
     State.to_string (Request.state !current)
@@ -61,7 +76,15 @@ module Make (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t) = struct
     in
     respond reqd status (json_request kind outcome)
 
-  let submit reqd request command =
+  let fail_storage reqd message =
+    blocked := true;
+    Logs.err (fun log -> log "%s" message);
+    respond reqd `Internal_server_error (json_error "storage_unavailable")
+
+  let commit store machine =
+    Store.set store capsule_key (Request.snapshot machine)
+
+  let submit store reqd request command =
     match H1.Headers.get request.H1.Request.headers "idempotency-key" with
     | None ->
         respond reqd `Bad_request (json_error "missing_idempotency_key")
@@ -70,37 +93,91 @@ module Make (HTTP_server : Paf_mirage.S with type ipaddr = Ipaddr.t) = struct
         if String.equal request_id "" then
           respond reqd `Bad_request (json_error "missing_idempotency_key")
         else
-          let next, response =
-            Request.submit !current ~request_id command
-          in
-          current := next;
-          match response with
-          | Request.Fresh outcome ->
-              respond_outcome reqd "fresh" outcome
-          | Request.Replay outcome ->
-              respond_outcome reqd "replay" outcome
-          | Request.Id_conflict ->
-              respond reqd `Conflict (json_error "id_conflict")
+          Lwt.async (fun () ->
+            Lwt_mutex.with_lock mutation_lock (fun () ->
+              if !blocked then begin
+                respond reqd `Internal_server_error
+                  (json_error "storage_unavailable");
+                Lwt.return_unit
+              end else
+                let next, response =
+                  Request.submit !current ~request_id command
+                in
+                match response with
+                | Request.Replay outcome ->
+                    respond_outcome reqd "replay" outcome;
+                    Lwt.return_unit
+                | Request.Id_conflict ->
+                    respond reqd `Conflict (json_error "id_conflict");
+                    Lwt.return_unit
+                | Request.Fresh outcome ->
+                    commit store next >>= function
+                    | Ok () ->
+                        current := next;
+                        respond_outcome reqd "fresh" outcome;
+                        Lwt.return_unit
+                    | Error error ->
+                        fail_storage reqd
+                          (Fmt.str "persistent commit failed: %a"
+                             Store.pp_write_error error);
+                        Lwt.return_unit))
 
-  let request_handler _flow (_ipaddr, _port) reqd =
+  let request_handler store _flow (_ipaddr, _port) reqd =
     let request = H1.Reqd.request reqd in
     H1.Body.Reader.close (H1.Reqd.request_body reqd);
-    match request.H1.Request.meth, request.H1.Request.target with
-    | `GET, "/state" ->
-        respond reqd `OK (json_state ())
-    | `POST, "/arm" ->
-        submit reqd request State.Arm
-    | `POST, "/consume" ->
-        submit reqd request State.Consume
-    | _ ->
-        respond reqd `Not_found {|{"error":"not_found"}
+    if !blocked then
+      respond reqd `Internal_server_error (json_error "storage_unavailable")
+    else
+      match request.H1.Request.meth, request.H1.Request.target with
+      | `GET, "/state" ->
+          respond reqd `OK (json_state ())
+      | `POST, "/arm" ->
+          submit store reqd request State.Arm
+      | `POST, "/consume" ->
+          submit store reqd request State.Consume
+      | _ ->
+          respond reqd `Not_found {|{"error":"not_found"}
 |}
 
   let error_handler (_ipaddr, _port) ?request:_ _error _send = ()
 
-  let start http_server =
+  let load store =
+    Store.get store capsule_key >>= function
+    | Ok payload ->
+        (match Request.restore payload with
+         | Ok machine ->
+             Logs.info (fun log ->
+               log "restored durable capsule state=%s receipts=%d"
+                 (State.to_string (Request.state machine))
+                 (Request.seen_count machine));
+             Lwt.return machine
+         | Error error ->
+             let message =
+               Printf.sprintf "invalid persisted capsule snapshot: %s" error
+             in
+             Logs.err (fun log -> log "%s" message);
+             Lwt.fail_with message)
+    | Error (`Not_found _) ->
+        let machine = Request.initial in
+        commit store machine >>= (function
+          | Ok () ->
+              Logs.info (fun log -> log "initialized fresh durable capsule");
+              Lwt.return machine
+          | Error error ->
+              Lwt.fail_with
+                (Fmt.str "initial persistent commit failed: %a"
+                   Store.pp_write_error error))
+    | Error error ->
+        Lwt.fail_with
+          (Fmt.str "persistent load failed: %a" Store.pp_error error)
+
+  let start http_server store =
+    load store >>= fun machine ->
+    current := machine;
     let service =
-      HTTP_server.http_service ~error_handler request_handler
+      HTTP_server.http_service
+        ~error_handler
+        (request_handler store)
     in
     let (`Initialized thread) = Paf.serve service http_server in
     thread
